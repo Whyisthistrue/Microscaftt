@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Preston Candy Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+        }
+        #map {
+            height: 100vh;
+            width: 100vw;
+        }
+        #toggleMode, #filterCandy, #routeOptions, #endRoute {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            padding: 10px;
+            background-color: white;
+            border: 1px solid #333;
+            cursor: pointer;
+        }
+        #filterCandy {
+            top: 50px;
+        }
+        #routeOptions {
+            top: 90px;
+        }
+        #endRoute {
+            top: 130px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="toggleMode">Switch to Dev Mode</div>
+<select id="filterCandy">
+    <option value="">Show All Candies</option>
+</select>
+<div id="routeOptions">
+    <label for="routeCandy">Route Candy:</label>
+    <select id="routeCandy">
+        <option value="">Choose Candy</option>
+    </select>
+    <label for="houseCount">Number of Houses:</label>
+    <input type="number" id="houseCount" min="1" value="3" style="width: 60px;">
+    <button id="createRoute">Create Route</button>
+</div>
+<button id="endRoute">End Route</button>
+<div id="map"></div>
+
+<!-- Leaflet library -->
+<script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+<!-- Leaflet Routing Machine for the route creation -->
+<script src="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.js"></script>
+
+<script>
+    // Initialize the map centered on Preston, Idaho
+    var map = L.map('map', {
+        minZoom: 8,  // Minimum zoom level to ensure markers stay visible
+        maxZoom: 19  // Maximum zoom level for details
+    }).setView([42.0963, -111.8766], 14); // Preston coordinates
+
+    // Set up the tile layer from OpenStreetMap
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Data for candies
+    var candyOptions = [
+        'Snickers', 'Peanut Butter Cups', 'Hershey\'s Kisses',
+        'Kit Kat', 'M&Ms', 'Hershey Bar', 'Twix', 'Starbursts'
+    ];
+
+    // Add candy options to the filter and route dropdowns
+    var filterDropdown = document.getElementById('filterCandy');
+    var routeCandyDropdown = document.getElementById('routeCandy');
+    candyOptions.forEach(function(candy) {
+        var option = document.createElement('option');
+        option.value = candy;
+        option.textContent = candy;
+        filterDropdown.appendChild(option);
+        routeCandyDropdown.appendChild(option.cloneNode(true));
+    });
+
+    // Mode and marker control
+    var devMode = false;
+    var loadedBuildings = {}; // Stores buildings and candy data
+    var markers = {}; // Store markers by ID for easy management
+    var currentCandyFilter = ''; // Track the current candy filter
+    var routingControl = null;  // For managing routes
+    var routingMode = false; // Track if routing mode is active
+
+    // Function to query OpenStreetMap buildings data via Overpass API (2-mile radius)
+    function fetchBuildings(bbox) {
+        var overpassApiUrl = 'https://overpass-api.de/api/interpreter';
+        var query = `
+            [out:json];
+            (
+              way["building"](around:3220,42.0963,-111.8766);  // 2-mile radius (3.22 km)
+              relation["building"](around:3220,42.0963,-111.8766);
+            );
+            out center;
+        `;
+
+        fetch(overpassApiUrl, {
+            method: 'POST',
+            body: query,
+        })
+        .then(response => response.json())
+        .then(data => {
+            data.elements.forEach((element) => {
+                var id = element.id;
+                if (!loadedBuildings[id]) { // Only create markers for new buildings
+                    var lat = element.center ? element.center.lat : element.lat;
+                    var lon = element.center ? element.center.lon : element.lon;
+
+                    // Assign random candy or use existing candy data
+                    var candy = candyOptions[Math.floor(Math.random() * candyOptions.length)];
+                    if (loadedBuildings[id]) candy = loadedBuildings[id].candy;
+
+                    // Store building data
+                    var building = { id, lat, lon, candy };
+                    loadedBuildings[id] = building;
+                    createMarker(building);
+                }
+            });
+        })
+        .catch(err => console.error('Error fetching building data:', err));
+    }
+
+    // Function to create markers with candy labels for buildings
+    function createMarker(building) {
+        var marker = L.marker([building.lat, building.lon]).addTo(map);
+
+        markers[building.id] = marker; // Store marker reference by building ID
+
+        // Create a popup with the candy name
+        var popupContent = `<b>Candy: ${building.candy}</b>`;
+
+        // Candy dropdown for dev mode
+        var candySelector = document.createElement('select');
+        candyOptions.forEach(function (candy) {
+            var option = document.createElement('option');
+            option.value = candy;
+            option.textContent = candy;
+            candySelector.appendChild(option);
+        });
+        candySelector.value = building.candy;
+        candySelector.addEventListener('change', function () {
+            building.candy = this.value;
+            marker.setPopupContent(`<b>Candy: ${this.value}</b>`);
+            applyCandyFilter(); // Reapply the filter when candy changes
+        });
+
+        // Bind popup and candy selector based on mode
+        marker.bindPopup(devMode ? candySelector : popupContent);
+
+        // Show or hide marker based on current candy filter
+        if (currentCandyFilter && building.candy !== currentCandyFilter) {
+            map.removeLayer(marker); // Hide marker if not matching filter
+        }
+    }
+
+    // Toggle between Dev Mode and Normal Mode
+    document.getElementById('toggleMode').addEventListener('click', function () {
+        devMode = !devMode;
+        if (devMode) {
+            this.innerHTML = 'Switch to Normal Mode';
+        } else {
+            this.innerHTML = 'Switch to Dev Mode';
+        }
+
+        // Refresh markers to ensure mode consistency
+        for (var id in markers) {
+            if (markers[id]) {
+                map.removeLayer(markers[id]); // Remove existing markers
+                createMarker(loadedBuildings[id]); // Recreate with updated mode
+            }
+        }
+    });
+
+    // Function to filter markers by selected candy
+    filterDropdown.addEventListener('change', function () {
+        currentCandyFilter = this.value;
+        applyCandyFilter();
+    });
+
+    // Function to apply the candy filter
+    function applyCandyFilter() {
+        for (var id in markers) {
+            if (markers[id]) {
+                var building = loadedBuildings[id];
+                if (currentCandyFilter === '' || building.candy === currentCandyFilter) {
+                    if (!map.hasLayer(markers[id])) {
+                        map.addLayer(markers[id]); // Show marker if it matches filter
+                    }
+                } else {
+                    map.removeLayer(markers[id]); // Hide marker if it doesn't match filter
+                }
+            }
+        }
+    }
+
+    // Function to create a route between selected houses and follow the streets
+    document.getElementById('createRoute').addEventListener('click', function () {
+        var candyType = document.getElementById('routeCandy').value;
+        var houseCount = parseInt(document.getElementById('houseCount').value, 10);
+
+        if (!candyType || houseCount < 1) {
+            alert('Please select a candy and set a valid number of houses.');
+            return;
+        }
+
+        if (routingControl) {
+            map.removeControl(routingControl); // Remove existing route
+        }
+
+        // Enter routing mode and hide all markers except for the route
+        routingMode = true;
+        document.getElementById('endRoute').style.display = 'block'; // Show end route button
+        for (var id in markers) {
+            if (markers[id]) {
+                map.removeLayer(markers[id]); // Hide all markers temporarily
+            }
+        }
+
+        // Collect all buildings with the selected candy
+        var waypoints = [];
+        for (var id in loadedBuildings) {
+            if (loadedBuildings[id].candy === candyType) {
+                var building = loadedBuildings[id];
+                waypoints.push(L.latLng(building.lat, building.lon));
+                if (waypoints.length <= houseCount) {
+                    markers[id].addTo(map); // Add marker back to map for relevant houses
+                }
+            }
+        }
+
+        // Limit the number of houses to the requested count
+        waypoints = waypoints.slice(0, houseCount);
+
+        // Add a route between the waypoints if there are enough houses
+        if (waypoints.length > 1) {
+            routingControl = L.Routing.control({
+                waypoints: waypoints,
+                routeWhileDragging: true,
+                lineOptions: {
+                    styles: [{ color: 'red', opacity: 1, weight: 5 }] // Red route for visibility
+                },
+                createMarker: function(i, waypoint, n) {
+                    return L.marker(waypoint.latLng, {
+                        icon: L.divIcon({
+                            className: 'route-marker',
+                            html: i === 0 ? 'Start' : i === n - 1 ? 'End' : ''
+                        })
+                    });
+                }
+            }).addTo(map);
+        } else {
+            alert('Not enough houses found for the selected candy.');
+        }
+    });
+
+    // Function to end the route and return to normal mode
+    document.getElementById('endRoute').addEventListener('click', function () {
+        routingMode = false;
+        document.getElementById('endRoute').style.display = 'none'; // Hide the end route button
+        if (routingControl) {
+            map.removeControl(routingControl); // Remove the current route
+        }
+        // Show all markers again
+        for (var id in markers) {
+            if (!map.hasLayer(markers[id])) {
+                markers[id].addTo(map);
+            }
+        }
+    });
+
+    // Function to get the current map bounds in a format suitable for Overpass API
+    function getBoundingBox() {
+        var bounds = map.getBounds();
+        return {
+            north: bounds.getNorth(),
+            south: bounds.getSouth(),
+            east: bounds.getEast(),
+            west: bounds.getWest()
+        };
+    }
+
+    // Function to show/hide markers based on current bounds
+    function updateVisibleMarkers() {
+        var bounds = map.getBounds();
+
+        // Loop through all markers and only show ones inside bounds
+        for (var id in loadedBuildings) {
+            var building = loadedBuildings[id];
+            var latLng = L.latLng(building.lat, building.lon);
+
+            if (bounds.contains(latLng)) {
+                if (!markers[id]) {
+                    createMarker(building); // Create new marker if not already shown
+                } else if (!map.hasLayer(markers[id])) {
+                    markers[id].addTo(map); // Add marker back to map if hidden
+                }
+            } else {
+                if (markers[id] && map.hasLayer(markers[id])) {
+                    map.removeLayer(markers[id]); // Remove marker if out of bounds
+                }
+            }
+        }
+    }
+
+    // Event: When zooming or panning, update the markers based on visibility
+    map.on('moveend', function () {
+        if (!routingMode) {
+            updateVisibleMarkers(); // Dynamically update which markers are shown
+        }
+    });
+
+    // Load buildings when the page is first loaded
+    fetchBuildings(getBoundingBox());
+
+</script>
+</body>
+</html>
